@@ -80,7 +80,8 @@ class KinesisConsumer(object):
     """
     LOCK_DURATION = 30
 
-    def __init__(self, stream_name, boto3_session=None, state=None, reader_sleep_time=None):
+    def __init__(self, stream_name, boto3_session=None, state=None, reader_sleep_time=None,
+                 default_iterator_type='LATEST'):
         self.stream_name = stream_name
         self.error_queue = multiprocessing.Queue()
         self.record_queue = multiprocessing.Queue()
@@ -95,6 +96,7 @@ class KinesisConsumer(object):
         self.shards = {}
         self.stream_data = None
         self.run = True
+        self.default_iterator_type = default_iterator_type
 
     def state_shard_id(self, shard_id):
         return '_'.join([self.stream_name, shard_id])
@@ -113,6 +115,10 @@ class KinesisConsumer(object):
 
         setup_again = False
         for shard_data in self.stream_data['StreamDescription']['Shards']:
+            ending_sequence = shard_data.get('SequenceNumberRange', {}).get("EndingSequenceNumber", None)
+            if ending_sequence:
+                log.info("Shard %s is already closed.", shard_data['ShardId'])
+                continue
             # see if we can get a lock on this shard id
             try:
                 shard_locked = self.state.lock_shard(self.state_shard_id(shard_data['ShardId']), self.LOCK_DURATION)
@@ -123,7 +129,7 @@ class KinesisConsumer(object):
                 if not shard_locked:
                     # if we currently have a shard reader running we stop it
                     if shard_data['ShardId'] in self.shards:
-                        log.warn("We lost our lock on shard %s, stopping shard reader", shard_data['ShardId'])
+                        log.warning("We lost our lock on shard %s, stopping shard reader", shard_data['ShardId'])
                         self.shutdown_shard_reader(shard_data['ShardId'])
 
                     # since we failed to lock the shard we just continue to the next one
@@ -136,7 +142,7 @@ class KinesisConsumer(object):
                     iterator_args = self.state.get_iterator_args(self.state_shard_id(shard_data['ShardId']))
                 except AttributeError:
                     # no self.state
-                    iterator_args = dict(ShardIteratorType='LATEST')
+                    iterator_args = dict(ShardIteratorType=self.default_iterator_type)
 
                 log.info("%s iterator arguments: %s", shard_data['ShardId'], iterator_args)
 
@@ -179,6 +185,7 @@ class KinesisConsumer(object):
         self.shards = {}
         self.run = False
 
+    @property
     def __iter__(self):
         try:
             # use lock duration - 1 here since we want to renew our lock before it expires

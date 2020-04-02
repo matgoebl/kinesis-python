@@ -13,11 +13,12 @@ log = logging.getLogger(__name__)
 
 
 class DynamoDB(object):
-    def __init__(self, table_name, boto3_session=None):
+    def __init__(self, table_name, boto3_session=None, default_iterator_type='LATEST'):
         self.boto3_session = boto3_session or boto3.Session()
 
         self.dynamo_resource = self.boto3_session.resource('dynamodb')
         self.dynamo_table = self.dynamo_resource.Table(table_name)
+        self.default_iterator_type = default_iterator_type
 
         self.shards = {}
 
@@ -29,7 +30,7 @@ class DynamoDB(object):
             )
         except KeyError:
             return dict(
-                ShardIteratorType='LATEST'
+                ShardIteratorType=self.default_iterator_type
             )
 
     def checkpoint(self, shard_id, seq):
