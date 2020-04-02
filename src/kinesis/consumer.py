@@ -101,7 +101,9 @@ class KinesisConsumer(object):
         self.run = True
         self.default_iterator_type = default_iterator_type
 
-    def state_shard_id(self, shard_id):
+        self.checkpoints = {}
+
+    def state_shard_id(self, shard_id: str) -> str:
         return '_'.join([self.stream_name, shard_id])
 
     def shutdown_shard_reader(self, shard_id):
@@ -197,7 +199,21 @@ class KinesisConsumer(object):
         self.shards = {}
         self.run = False
 
-    @property
+    def flush_checkpoint(self):
+        if len(self.checkpoints) > 0:
+            for shard_id, sequence_number in self.checkpoints.items():
+                try:
+                    state_shard_id = self.state_shard_id(shard_id)
+                    self.state.checkpoint(state_shard_id, sequence_number)
+                except AttributeError:
+                    # no self.state
+                    pass
+                except Exception:
+                    log.exception("Unhandled exception check pointing records from %s at %s",
+                                  shard_id, sequence_number)
+                    self.shutdown_shard_reader(shard_id)
+            self.checkpoints = {}
+
     def __iter__(self):
         try:
             # use lock duration - 1 here since we want to renew our lock before it expires
@@ -220,16 +236,7 @@ class KinesisConsumer(object):
                             log.debug(item)
                             yield item
 
-                            try:
-                                self.state.checkpoint(state_shard_id, item['SequenceNumber'])
-                            except AttributeError:
-                                # no self.state
-                                pass
-                            except Exception:
-                                log.exception("Unhandled exception check pointing records from %s at %s",
-                                              shard_id, item['SequenceNumber'])
-                                self.shutdown_shard_reader(shard_id)
-                                break
+                            self.checkpoints[shard_id] = item['SequenceNumber']
 
                     shard_id = None
                     try:
@@ -243,7 +250,11 @@ class KinesisConsumer(object):
                     if shard_id is not None:
                         # we encountered an error from a shard reader, break out of the inner loop to setup the shards
                         break
+
+                self.flush_checkpoint()
+
         except (KeyboardInterrupt, SystemExit):
             self.run = False
+            self.flush_checkpoint()
         finally:
             self.shutdown()
