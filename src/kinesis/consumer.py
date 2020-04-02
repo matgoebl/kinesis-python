@@ -3,7 +3,7 @@ from __future__ import absolute_import
 import logging
 import multiprocessing
 import time
-import dateutil
+import dateutil.parser
 
 import boto3
 import six.moves.queue
