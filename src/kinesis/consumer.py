@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import logging
 import multiprocessing
 import time
+import dateutil
 
 import boto3
 import six.moves.queue
@@ -81,7 +82,8 @@ class KinesisConsumer(object):
     LOCK_DURATION = 30
 
     def __init__(self, stream_name, boto3_session=None, state=None, reader_sleep_time=None,
-                 default_iterator_type='LATEST'):
+                 default_iterator_type='LATEST',
+                 start_at_timestamp=None):
         self.stream_name = stream_name
         self.error_queue = multiprocessing.Queue()
         self.record_queue = multiprocessing.Queue()
@@ -92,6 +94,7 @@ class KinesisConsumer(object):
         self.state = state
 
         self.reader_sleep_time = reader_sleep_time
+        self.start_at_timestamp = start_at_timestamp
 
         self.shards = {}
         self.stream_data = None
@@ -138,11 +141,20 @@ class KinesisConsumer(object):
             # we should try to start a shard reader if the shard id specified isn't in our shards
             if shard_data['ShardId'] not in self.shards:
                 log.info("Shard reader for %s does not exist, creating...", shard_data['ShardId'])
+
                 try:
                     iterator_args = self.state.get_iterator_args(self.state_shard_id(shard_data['ShardId']))
                 except AttributeError:
                     # no self.state
-                    iterator_args = dict(ShardIteratorType=self.default_iterator_type)
+                    if self.start_at_timestamp is not None:
+                        iterator_args = {
+                            "ShardIteratorType": 'AT_TIMESTAMP',
+                            "Timestamp": dateutil.parser.parse(
+                                self.start_at_timestamp
+                            )
+                        }
+                    else:
+                        iterator_args = dict(ShardIteratorType=self.default_iterator_type)
 
                 log.info("%s iterator arguments: %s", shard_data['ShardId'], iterator_args)
 
