@@ -52,7 +52,7 @@ class ShardReader(SubprocessLoop):
                     30,
                     (self.retries or 1) * 2
                 ))
-                log.debug("Retrying get_records (#%d %ds): %s", self.retries+1, loop_status, exc)
+                log.debug("Retrying get_records (#%d %ds): %s", self.retries + 1, loop_status, exc)
             else:
                 log.error("Client error occurred while reading: %s", exc)
                 loop_status = False
@@ -73,6 +73,11 @@ class ShardReader(SubprocessLoop):
         log.info("Shard reader for %s stoping", self.shard_id)
 
 
+class KinesisCheckPointType(object):
+    BY_RECORD = 1
+    BY_SEC = 10
+
+
 class KinesisConsumer(object):
     """Consume from a kinesis stream
 
@@ -83,7 +88,10 @@ class KinesisConsumer(object):
 
     def __init__(self, stream_name, boto3_session=None, state=None, reader_sleep_time=None,
                  default_iterator_type='LATEST',
-                 start_at_timestamp=None):
+                 start_at_timestamp=None,
+                 checkpoint_type=KinesisCheckPointType.BY_RECORD,
+                 checkpoint_interval=1):
+
         self.stream_name = stream_name
         self.error_queue = multiprocessing.Queue()
         self.record_queue = multiprocessing.Queue()
@@ -92,6 +100,8 @@ class KinesisConsumer(object):
         self.kinesis_client = self.boto3_session.client('kinesis')
 
         self.state = state
+        self.checkpoint_type = checkpoint_type
+        self.checkpoint_interval = checkpoint_interval
 
         self.reader_sleep_time = reader_sleep_time
         self.start_at_timestamp = start_at_timestamp
@@ -214,6 +224,7 @@ class KinesisConsumer(object):
                     self.shutdown_shard_reader(shard_id)
             self.checkpoints = {}
 
+
     def __iter__(self):
         try:
             # use lock duration - 1 here since we want to renew our lock before it expires
@@ -221,6 +232,9 @@ class KinesisConsumer(object):
             while self.run:
                 last_setup_check = time.time()
                 self.setup_shards()
+
+                if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
+                    last_flush_checkpoint_time = time.time()
 
                 while self.run and (time.time() - last_setup_check) < lock_duration_check:
                     try:
@@ -236,7 +250,17 @@ class KinesisConsumer(object):
                             log.debug(item)
                             yield item
 
-                            self.checkpoints[shard_id] = item['SequenceNumber']
+                            # add interval check pointing
+                            if self.checkpoint_type == KinesisCheckPointType.BY_RECORD:
+                                self.state.checkpoint(state_shard_id, item['SequenceNumber'])
+                            elif self.checkpoint_type == KinesisCheckPointType.BY_SEC:
+                                self.checkpoints[shard_id] = item['SequenceNumber']
+                                if (time.time() - last_flush_checkpoint_time) >= self.checkpoint_interval:
+                                    self.flush_checkpoint()
+                                    last_flush_checkpoint_time = time.time()
+                            else:
+                                # don't use checkpoint.
+                                pass
 
                     shard_id = None
                     try:
@@ -251,10 +275,13 @@ class KinesisConsumer(object):
                         # we encountered an error from a shard reader, break out of the inner loop to setup the shards
                         break
 
-                self.flush_checkpoint()
+                if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
+                    self.flush_checkpoint()
 
         except (KeyboardInterrupt, SystemExit):
             self.run = False
-            self.flush_checkpoint()
+
+            if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
+                self.flush_checkpoint()
         finally:
             self.shutdown()
