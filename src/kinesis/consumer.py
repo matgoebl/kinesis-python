@@ -283,5 +283,7 @@ class KinesisConsumer(object):
 
             if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
                 self.flush_checkpoint()
+
+            raise
         finally:
             self.shutdown()
