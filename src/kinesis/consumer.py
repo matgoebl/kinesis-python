@@ -224,7 +224,6 @@ class KinesisConsumer(object):
                     self.shutdown_shard_reader(shard_id)
             self.checkpoints = {}
 
-
     def __iter__(self):
         try:
             # use lock duration - 1 here since we want to renew our lock before it expires
@@ -283,7 +282,6 @@ class KinesisConsumer(object):
 
             if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
                 self.flush_checkpoint()
-
-            raise
         finally:
             self.shutdown()
+            raise SystemExit
