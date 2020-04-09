@@ -7,70 +7,9 @@ import dateutil.parser
 
 import boto3
 import six.moves.queue
-from botocore.exceptions import ClientError
-from offspring.process import SubprocessLoop
-
-from .exceptions import RETRY_EXCEPTIONS
+from kinesis.shard_reader import ShardReader as ShardReaderV2
 
 log = logging.getLogger(__name__)
-
-
-class ShardReader(SubprocessLoop):
-    """Read from a specific shard, passing records and errors back through queues"""
-    # how long we sleep between calls to get_records
-    # this follow these best practices: http://docs.aws.amazon.com/streams/latest/dev/kinesis-low-latency.html
-    # this can be influeced per-reader instance via the sleep_time arg
-    DEFAULT_SLEEP_TIME = 1.0
-
-    def __init__(self, shard_id, shard_iter, record_queue, error_queue, boto3_session=None, sleep_time=None):
-        self.shard_id = shard_id
-        self.shard_iter = shard_iter
-        self.record_queue = record_queue
-        self.error_queue = error_queue
-        self.boto3_session = boto3_session or boto3.Session()
-        self.sleep_time = sleep_time or self.DEFAULT_SLEEP_TIME
-        self.start()
-
-    def begin(self):
-        """Begin the shard reader main loop"""
-        log.info("Shard reader for %s starting", self.shard_id)
-        self.client = self.boto3_session.client('kinesis')
-        self.retries = 0
-
-    def loop(self):
-        """Each loop iteration - returns a sleep time or False to stop the loop"""
-        # by default we will sleep for our sleep_time each loop
-        loop_status = self.sleep_time
-
-        try:
-            resp = self.client.get_records(ShardIterator=self.shard_iter)
-        except ClientError as exc:
-            if exc.response['Error']['Code'] in RETRY_EXCEPTIONS:
-                # sleep for 1 second the first loop, 1 second the next, then 2, 4, 6, 8, ..., up to a max of 30 or
-                # until we complete a successful get_records call
-                loop_status = min((
-                    30,
-                    (self.retries or 1) * 2
-                ))
-                log.debug("Retrying get_records (#%d %ds): %s", self.retries + 1, loop_status, exc)
-            else:
-                log.error("Client error occurred while reading: %s", exc)
-                loop_status = False
-        else:
-            if not resp['NextShardIterator']:
-                # the shard has been closed
-                log.info("Our shard has been closed, exiting")
-                return False
-
-            self.shard_iter = resp['NextShardIterator']
-            self.record_queue.put((self.shard_id, resp))
-            self.retries = 0
-
-        return loop_status
-
-    def end(self):
-        """End of the main loop"""
-        log.info("Shard reader for %s stoping", self.shard_id)
 
 
 class KinesisCheckPointType(object):
@@ -177,7 +116,7 @@ class KinesisConsumer(object):
                     **iterator_args
                 )
 
-                self.shards[shard_data['ShardId']] = ShardReader(
+                self.shards[shard_data['ShardId']] = ShardReaderV2(
                     shard_data['ShardId'],
                     shard_iter['ShardIterator'],
                     self.record_queue,
@@ -189,10 +128,10 @@ class KinesisConsumer(object):
                 log.debug(
                     "Checking shard reader %s process at pid %d",
                     shard_data['ShardId'],
-                    self.shards[shard_data['ShardId']].process.pid
+                    self.shards[shard_data['ShardId']].pid
                 )
 
-                if not self.shards[shard_data['ShardId']].process.is_alive():
+                if not self.shards[shard_data['ShardId']].is_alive():
                     self.shutdown_shard_reader(shard_data['ShardId'])
                     setup_again = True
                 else:
@@ -205,35 +144,41 @@ class KinesisConsumer(object):
         for shard_id in self.shards:
             log.info("Shutting down shard reader for %s", shard_id)
             self.shards[shard_id].shutdown()
-        self.stream_data = None
-        self.shards = {}
-        self.run = False
+            self.shards[shard_id].terminate()
 
-    def flush_checkpoint(self):
-        if len(self.checkpoints) > 0:
-            for shard_id, sequence_number in self.checkpoints.items():
-                try:
-                    state_shard_id = self.state_shard_id(shard_id)
-                    self.state.checkpoint(state_shard_id, sequence_number)
-                except AttributeError:
-                    # no self.state
-                    pass
-                except Exception:
-                    log.exception("Unhandled exception check pointing records from %s at %s",
-                                  shard_id, sequence_number)
-                    self.shutdown_shard_reader(shard_id)
-            self.checkpoints = {}
+        self.stream_data = None
+        self.run = False
+        self.shards = {}
+
+    def flush_checkpoint(self, shard_id=None):
+        sequence_number = None
+
+        if not shard_id:
+            log.info("flush checkpoints '%s': '%s'", shard_id, self.checkpoints[shard_id])
+            # noinspection PyBroadException
+            try:
+                sequence_number = self.checkpoints[shard_id]
+                state_shard_id = self.state_shard_id(shard_id)
+                self.state.checkpoint(state_shard_id, sequence_number)
+            except AttributeError:
+                # no self.state
+                pass
+            except Exception:
+                log.exception("Unhandled exception check pointing records from %s at %s",
+                              shard_id, sequence_number)
+                self.shutdown_shard_reader(shard_id)
+
+            del self.checkpoints[shard_id]
 
     def __iter__(self):
         try:
             # use lock duration - 1 here since we want to renew our lock before it expires
             lock_duration_check = self.LOCK_DURATION - 1
+
             while self.run:
                 last_setup_check = time.time()
+                last_flush_checkpoint_time = time.time()
                 self.setup_shards()
-
-                if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
-                    last_flush_checkpoint_time = time.time()
 
                 while self.run and (time.time() - last_setup_check) < lock_duration_check:
                     try:
@@ -246,7 +191,7 @@ class KinesisConsumer(object):
                             if not self.run:
                                 break
 
-                            log.debug(item)
+                            # log.debug(item)
                             yield item
 
                             # add interval check pointing
@@ -255,7 +200,7 @@ class KinesisConsumer(object):
                             elif self.checkpoint_type == KinesisCheckPointType.BY_SEC:
                                 self.checkpoints[shard_id] = item['SequenceNumber']
                                 if (time.time() - last_flush_checkpoint_time) >= self.checkpoint_interval:
-                                    self.flush_checkpoint()
+                                    self.flush_checkpoint(shard_id)
                                     last_flush_checkpoint_time = time.time()
                             else:
                                 # don't use checkpoint.
@@ -274,14 +219,7 @@ class KinesisConsumer(object):
                         # we encountered an error from a shard reader, break out of the inner loop to setup the shards
                         break
 
-                if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
-                    self.flush_checkpoint()
-
-        except (KeyboardInterrupt, SystemExit):
+        except KeyboardInterrupt:
             self.run = False
-
-            if self.checkpoint_type == KinesisCheckPointType.BY_SEC:
-                self.flush_checkpoint()
         finally:
             self.shutdown()
-            raise SystemExit
