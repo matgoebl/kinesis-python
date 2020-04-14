@@ -30,7 +30,6 @@ class ShardReader(multiprocessing.Process):
 
         self.process = multiprocessing.Process.__init__(self)
         self.exit_event = multiprocessing.Event()
-        self.process.daemon = True
 
         self.start()
 
