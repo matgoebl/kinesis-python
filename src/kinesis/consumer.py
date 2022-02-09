@@ -28,7 +28,7 @@ class KinesisConsumer(object):
     def __init__(self, stream_name, boto3_session=None, state=None, reader_sleep_time=None,
                  default_iterator_type='LATEST',
                  start_at_timestamp=None,
-                 checkpoint_type=KinesisCheckPointType.BY_RECORD,
+                 checkpoint_type=None,
                  checkpoint_interval=1):
 
         self.stream_name = stream_name

@@ -92,7 +92,7 @@ class AsyncProducer(SubprocessLoop):
 
             record = {
                 'Data': data,
-                'PartitionKey': partition_key or '{0}{1}'.format(time.clock(), time.time()),
+                'PartitionKey': partition_key or '{0}{1}'.format(time.process_time(), time.time()),
             }
             if explicit_hash_key is not None:
                 record['ExplicitHashKey'] = explicit_hash_key
